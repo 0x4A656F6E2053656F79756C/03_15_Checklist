@@ -632,6 +632,12 @@ class ChecklistApp(QWidget):
             self.done_list.addItem(item)
             self.done_list.setItemWidget(item, widget)
 
+    def closeEvent(self, event):
+        """프로그램이 종료될 때(윈도우 종료 포함) 실행되는 이벤트"""
+        self.save_data()
+        self.save_settings()
+        event.accept()
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
