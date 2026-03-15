@@ -10,8 +10,15 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt6.QtCore import Qt, QDate, QPoint
 from PyQt6.QtGui import QFont, QAction
 
-DATA_FILE = "tasks.json"
-SETTINGS_FILE = "settings.json"
+if getattr(sys, 'frozen', False):
+    # exe로 빌드된 경우
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    # 파이썬으로 실행 중인 경우
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DATA_FILE = os.path.join(BASE_DIR, "tasks.json")
+SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
 # 카테고리별 파스텔톤 배경색 지정
 CATEGORY_COLORS = {
