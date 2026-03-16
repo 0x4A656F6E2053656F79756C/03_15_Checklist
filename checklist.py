@@ -5,10 +5,9 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QCheckBox, QLabel, QListWidget, QListWidgetItem,
                              QPushButton, QDialog, QTextEdit, QLineEdit, QDateEdit, 
-                             QColorDialog, QSizeGrip, QCalendarWidget,
-                             QSystemTrayIcon, QMenu, QStyle, QComboBox)
-from PyQt6.QtCore import Qt, QDate, QPoint
-from PyQt6.QtGui import QFont, QAction
+                             QColorDialog, QSizeGrip, QCalendarWidget, QComboBox)
+from PyQt6.QtCore import Qt, QDate, QPoint, QTimer
+from PyQt6.QtGui import QFont
 
 if getattr(sys, 'frozen', False):
     # exe로 빌드된 경우
@@ -20,9 +19,9 @@ else:
 DATA_FILE = os.path.join(BASE_DIR, "tasks.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
-# 카테고리별 파스텔톤 배경색 지정
+# 카테고리별 파스텔톤 배경색 지정 (숙제 -> 과제로 변경)
 CATEGORY_COLORS = {
-    "숙제": "#D9EAF7",  # 연파랑
+    "과제": "#D9EAF7",  # 연파랑
     "약속": "#D4EFDF",  # 연초록
     "미팅": "#E8DAEF",  # 연보라
     "중요": "#FADBD8",  # 연빨강
@@ -156,7 +155,7 @@ class MemoDialog(QDialog):
         cat_label = QLabel("카테고리:")
         cat_label.setFixedWidth(60)
         self.cat_combo = QComboBox()
-        self.cat_combo.addItems(["기타", "숙제", "약속", "미팅", "중요"])
+        self.cat_combo.addItems(["기타", "과제", "약속", "미팅", "중요"])
         self.cat_combo.setEditable(True) 
         self.cat_combo.setStyleSheet(COMBO_STYLE)
         
@@ -205,7 +204,6 @@ class DeleteDialog(QDialog):
         label.setStyleSheet("margin-bottom: 5px;")
         layout.addWidget(label)
 
-        # --- 상태별 일괄 선택 체크박스 레이아웃 ---
         cb_layout = QHBoxLayout()
         self.select_todo_cb = QCheckBox("진행 중 일괄 선택")
         self.select_todo_cb.stateChanged.connect(self.toggle_todo)
@@ -214,7 +212,6 @@ class DeleteDialog(QDialog):
         cb_layout.addWidget(self.select_todo_cb)
         cb_layout.addWidget(self.select_done_cb)
         layout.addLayout(cb_layout)
-        # ----------------------------------------
 
         self.list_widget = QListWidget()
         self.list_widget.setStyleSheet("border: 1px solid #ccc; border-radius: 3px;")
@@ -226,7 +223,6 @@ class DeleteDialog(QDialog):
             
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
-            # 아이템 내부에 완료 상태 데이터를 숨겨둠
             item.setData(Qt.ItemDataRole.UserRole, task["is_completed"]) 
             self.list_widget.addItem(item)
             
@@ -249,14 +245,14 @@ class DeleteDialog(QDialog):
         check_state = Qt.CheckState.Checked if state == 2 else Qt.CheckState.Unchecked
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            if not item.data(Qt.ItemDataRole.UserRole): # 진행 중인 일만 제어
+            if not item.data(Qt.ItemDataRole.UserRole): 
                 item.setCheckState(check_state)
 
     def toggle_done(self, state):
         check_state = Qt.CheckState.Checked if state == 2 else Qt.CheckState.Unchecked
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            if item.data(Qt.ItemDataRole.UserRole): # 완료된 일만 제어
+            if item.data(Qt.ItemDataRole.UserRole): 
                 item.setCheckState(check_state)
 
     def get_indices_to_delete(self):
@@ -295,7 +291,6 @@ class TaskWidget(QWidget):
         self.title_label.setStyleSheet("color: gray; text-decoration: line-through;" if self.task_data["is_completed"] else "color: black;")
         layout.addWidget(self.title_label, stretch=1)
 
-        # --- D-Day 텍스트 및 초과 여부 가져오기 ---
         dday_str, is_overdue = self.calculate_dday(self.task_data["deadline"])
         
         self.dday_label = QLabel(dday_str)
@@ -304,7 +299,6 @@ class TaskWidget(QWidget):
         self.dday_label.setMinimumWidth(65)
         self.dday_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         
-        # 기한이 지났고 아직 진행 중인 일이면 파란색, 그 외엔 빨간색
         if is_overdue and not self.task_data["is_completed"]:
             self.dday_label.setStyleSheet("color: #0275d8; font-weight: bold;") 
         else:
@@ -316,7 +310,7 @@ class TaskWidget(QWidget):
         today = datetime.now().date()
         delta = (deadline - today).days
         
-        is_overdue = delta < 0 # 기한이 지났는지 여부 판단
+        is_overdue = delta < 0 
         
         if delta > 0:
             return f"D-{delta}", is_overdue
@@ -357,11 +351,25 @@ class ChecklistApp(QWidget):
         self.load_data()
         self.clean_old_completed_tasks()
         self.init_ui()
-        self.init_tray_icon()
         self.refresh_lists()
 
+        # --- 자정 갱신을 위한 타이머 설정 ---
+        self.current_date = datetime.now().date()
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.check_date_change)
+        self.refresh_timer.start(60000) # 1분(60000ms)마다 날짜 확인
+
+    def check_date_change(self):
+        """1분마다 실행되어 자정이 지났는지 확인하고, 지났다면 앱을 새로고침"""
+        today = datetime.now().date()
+        if today != self.current_date:
+            self.current_date = today
+            self.clean_old_completed_tasks()
+            self.refresh_lists()
+
     def init_ui(self):
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint | Qt.WindowType.Tool)
+        # 작업 표시줄에 띄우기 위해 Tool 속성을 제거하고 바탕화면에 고정 유지
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(600, 450)
         
@@ -379,15 +387,13 @@ class ChecklistApp(QWidget):
         bg_layout = QVBoxLayout(self.bg_widget)
         self.main_layout.addWidget(self.bg_widget)
 
-        # --- 검색 바 추가 부분 시작 ---
         search_layout = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 할 일 및 메모 검색...")
         self.search_input.setStyleSheet("background-color: white; color: black; padding: 5px; border-radius: 3px; border: 1px solid #ccc;")
-        self.search_input.textChanged.connect(self.refresh_lists) # 글자를 칠 때마다 실시간 검색
+        self.search_input.textChanged.connect(self.refresh_lists) 
         search_layout.addWidget(self.search_input)
         bg_layout.addLayout(search_layout)
-        # --- 검색 바 추가 부분 끝 ---
 
         lists_layout = QHBoxLayout()
 
@@ -438,28 +444,20 @@ class ChecklistApp(QWidget):
 
         bottom_layout = QHBoxLayout()
         
-        # --- 새롭게 추가된 삭제 버튼 ---
         delete_btn = QPushButton("🗑️ 삭제")
         delete_btn.setStyleSheet("background-color: white; color: black; padding: 5px 15px; border-radius: 3px; border: 1px solid #ccc;")
         delete_btn.clicked.connect(self.open_delete_dialog)
-        # -----------------------------
 
         color_btn = QPushButton("🎨 색상")
         color_btn.setStyleSheet("background-color: white; color: black; padding: 5px 15px; border-radius: 3px; border: 1px solid #ccc;")
         color_btn.clicked.connect(self.choose_color)
         
-        hide_btn = QPushButton("⬇️ 숨기기")
-        hide_btn.setStyleSheet("background-color: white; color: black; padding: 5px 15px; border-radius: 3px; border: 1px solid #ccc;")
-        hide_btn.clicked.connect(self.hide_to_tray)
-        
         exit_btn = QPushButton("❌ 종료")
         exit_btn.setStyleSheet("background-color: white; color: black; padding: 5px 15px; border-radius: 3px; border: 1px solid #ccc;")
         exit_btn.clicked.connect(QApplication.instance().quit)
         
-        # 버튼들을 하단 레이아웃에 추가
         bottom_layout.addWidget(delete_btn)
         bottom_layout.addWidget(color_btn)
-        bottom_layout.addWidget(hide_btn)
         bottom_layout.addWidget(exit_btn)
         bottom_layout.addStretch() 
         
@@ -468,54 +466,18 @@ class ChecklistApp(QWidget):
         
         bg_layout.addLayout(bottom_layout)
 
-    # --- 새롭게 추가된 할 일 삭제 메서드 ---
     def open_delete_dialog(self):
         if not self.tasks:
-            return  # 삭제할 항목이 없으면 바로 반환
+            return  
             
         dialog = DeleteDialog(self.tasks, self)
         if dialog.exec():
             indices_to_delete = dialog.get_indices_to_delete()
             if indices_to_delete:
-                # 인덱스가 꼬이지 않도록 역순으로 정렬하여 삭제
                 for idx in sorted(indices_to_delete, reverse=True):
                     del self.tasks[idx]
                 self.save_data()
                 self.refresh_lists()
-    # ----------------------------------------
-
-    def init_tray_icon(self):
-        self.tray_icon = QSystemTrayIcon(self)
-        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView)
-        self.tray_icon.setIcon(icon)
-
-        tray_menu = QMenu()
-        show_action = QAction("체크리스트 열기", self)
-        show_action.triggered.connect(self.showNormal)
-        
-        quit_action = QAction("완전히 종료", self)
-        quit_action.triggered.connect(QApplication.instance().quit)
-
-        tray_menu.addAction(show_action)
-        tray_menu.addAction(quit_action)
-        
-        self.tray_icon.setContextMenu(tray_menu)
-        self.tray_icon.show()
-        self.tray_icon.activated.connect(self.on_tray_activated)
-
-    def hide_to_tray(self):
-        self.hide()
-        self.tray_icon.showMessage(
-            "체크리스트 앱 숨김", 
-            "앱이 백그라운드에서 실행 중입니다.\n아이콘을 더블클릭하면 다시 열립니다.", 
-            QSystemTrayIcon.MessageIcon.Information, 
-            3000
-        )
-
-    def on_tray_activated(self, reason):
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self.showNormal()
-            self.activateWindow()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -549,6 +511,7 @@ class ChecklistApp(QWidget):
                 self.win_x = settings.get("win_x")
                 self.win_y = settings.get("win_y")
 
+    # --- 누락되었던 설정 저장 메서드 복구 ---
     def save_settings(self):
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -556,6 +519,7 @@ class ChecklistApp(QWidget):
                 "win_x": self.x(),
                 "win_y": self.y()
             }, f)
+    # ----------------------------------------
 
     def load_data(self):
         if os.path.exists(DATA_FILE):
@@ -601,20 +565,16 @@ class ChecklistApp(QWidget):
         self.todo_list.clear()
         self.done_list.clear()
 
-        # 원본 데이터 정렬 (진행 중인 일은 오름차순, 완료된 일은 내림차순)
         todo_tasks_all = [t for t in self.tasks if not t["is_completed"]]
         done_tasks_all = [t for t in self.tasks if t["is_completed"]]
         
         todo_tasks_all.sort(key=lambda x: datetime.strptime(x["deadline"], "%Y-%m-%d").date())
         done_tasks_all.sort(key=lambda x: datetime.strptime(x["deadline"], "%Y-%m-%d").date(), reverse=True)
 
-        # 삭제 및 인덱스 동기화를 위해 원본 tasks 리스트를 정렬된 상태로 업데이트
         self.tasks = todo_tasks_all + done_tasks_all 
 
-        # 검색어 가져오기
         query = self.search_input.text().strip().lower() if hasattr(self, 'search_input') else ""
         
-        # 검색어가 있을 경우 필터링 (제목, 메모, 카테고리 텍스트 대상)
         todo_tasks_filtered = [t for t in todo_tasks_all if query in t["title"].lower() or query in t.get("memo", "").lower() or query in t.get("category", "").lower()]
         done_tasks_filtered = [t for t in done_tasks_all if query in t["title"].lower() or query in t.get("memo", "").lower() or query in t.get("category", "").lower()]
 
@@ -633,14 +593,12 @@ class ChecklistApp(QWidget):
             self.done_list.setItemWidget(item, widget)
 
     def closeEvent(self, event):
-        """프로그램이 종료될 때(윈도우 종료 포함) 실행되는 이벤트"""
         self.save_data()
         self.save_settings()
         event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
     
     font = QFont("Malgun Gothic", 10) 
     font.setStyleHint(QFont.StyleHint.SansSerif)
