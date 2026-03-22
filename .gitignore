@@ -5,3 +5,5 @@ settings.json
 MyChecklist.spec
 dist/
 build/
+credentials.json
+token.json

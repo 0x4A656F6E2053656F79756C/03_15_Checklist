@@ -1,13 +1,20 @@
 import sys
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QCheckBox, QLabel, QListWidget, QListWidgetItem,
                              QPushButton, QDialog, QTextEdit, QLineEdit, QDateEdit, 
-                             QColorDialog, QSizeGrip, QCalendarWidget, QComboBox)
+                             QColorDialog, QSizeGrip, QCalendarWidget, QComboBox, QMessageBox)
 from PyQt6.QtCore import Qt, QDate, QPoint, QTimer
 from PyQt6.QtGui import QFont
+
+# Google Calendar API imports
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -16,6 +23,10 @@ else:
 
 DATA_FILE = os.path.join(BASE_DIR, "tasks.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
+CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
+TOKEN_FILE = os.path.join(BASE_DIR, "token.json")
+
+SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 CATEGORY_COLORS = {
     "과제": "#D9EAF7",  
@@ -38,6 +49,69 @@ COMBO_STYLE = """
     QComboBox QAbstractItemView { background-color: white; color: black; selection-background-color: #d9534f; selection-color: white; }
 """
 
+# ==========================================
+# Google Calendar 매니저 클래스
+# ==========================================
+class GoogleCalendarManager:
+    def __init__(self):
+        self.creds = None
+        self.service = None
+        self.authenticate()
+
+    def authenticate(self):
+        try:
+            if os.path.exists(TOKEN_FILE):
+                self.creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+            if not self.creds or not self.creds.valid:
+                if self.creds and self.creds.expired and self.creds.refresh_token:
+                    self.creds.refresh(Request())
+                else:
+                    if not os.path.exists(CREDENTIALS_FILE):
+                        print("credentials.json 파일이 없습니다. 구글 캘린더 연동이 비활성화됩니다.")
+                        return
+                    flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+                    self.creds = flow.run_local_server(port=0)
+                with open(TOKEN_FILE, 'w') as token:
+                    token.write(self.creds.to_json())
+            
+            self.service = build('calendar', 'v3', credentials=self.creds)
+        except Exception as e:
+            print(f"구글 캘린더 인증 오류: {e}")
+
+    def get_upcoming_events(self, days=30):
+        if not self.service: return []
+        try:
+            # 안전한 삭제 검증을 위해 오늘 자정(00:00:00)부터의 모든 일정을 가져옴
+            today_start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+            time_min = today_start.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+            
+            events_result = self.service.events().list(
+                calendarId='primary', timeMin=time_min,
+                maxResults=200, singleEvents=True,
+                orderBy='startTime').execute()
+            return events_result.get('items', [])
+        except HttpError as error:
+            print(f"이벤트 가져오기 오류: {error}")
+            return []
+
+    def create_event(self, title, date_str, description=""):
+        if not self.service: return None
+        try:
+            event = {
+                'summary': title,
+                'description': description,
+                'start': {'date': date_str, 'timeZone': 'Asia/Seoul'},
+                'end': {'date': date_str, 'timeZone': 'Asia/Seoul'},
+            }
+            event = self.service.events().insert(calendarId='primary', body=event).execute()
+            return event.get('id')
+        except HttpError as error:
+            print(f"이벤트 생성 오류: {error}")
+            return None
+
+# ==========================================
+# UI 클래스들
+# ==========================================
 class DropdownCalendarWidget(QCalendarWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -189,7 +263,6 @@ class MemoDialog(QDialog):
         self.task_data["memo"] = self.memo_edit.toPlainText()
         self.accept()
 
-# --- 업데이트: 기억할 일 구분 및 일괄 선택 추가 ---
 class DeleteDialog(QDialog):
     def __init__(self, tasks, parent=None):
         super().__init__(parent)
@@ -226,13 +299,9 @@ class DeleteDialog(QDialog):
             is_done = task["is_completed"]
             has_date = bool(task.get("deadline"))
             
-            # 타입 지정 (일괄 선택 로직을 위해)
-            if is_done:
-                task_type = "done"
-            elif has_date:
-                task_type = "todo"
-            else:
-                task_type = "remember"
+            if is_done: task_type = "done"
+            elif has_date: task_type = "todo"
+            else: task_type = "remember"
                 
             status = "✅" if is_done else ("📌" if has_date else "💡")
             deadline_str = f" ({task['deadline']})" if has_date else ""
@@ -324,12 +393,9 @@ class TaskWidget(QWidget):
         
         is_overdue = delta < 0 
         
-        if delta > 0:
-            return f"D-{delta}", is_overdue
-        elif delta == 0:
-            return "D-DAY", is_overdue
-        else:
-            return f"D+{abs(delta)}", is_overdue
+        if delta > 0: return f"D-{delta}", is_overdue
+        elif delta == 0: return "D-DAY", is_overdue
+        else: return f"D+{abs(delta)}", is_overdue
 
     def on_checked(self, checked):
         self.task_data["is_completed"] = checked
@@ -350,6 +416,9 @@ class TaskWidget(QWidget):
             self.main_window.save_data()
             self.main_window.refresh_lists()
 
+# ==========================================
+# 메인 앱 클래스
+# ==========================================
 class ChecklistApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -357,28 +426,141 @@ class ChecklistApp(QWidget):
         self.bg_color = "rgba(253, 243, 169, 230)" 
         self.win_x = None
         self.win_y = None
+        self.win_w = 850
+        self.win_h = 500
         self.oldPos = None
+
+        self.gcal_manager = GoogleCalendarManager()
 
         self.load_settings()
         self.load_data()
         self.init_ui()
-        self.refresh_lists()
+        
+        # 앱 시작 시 한 번 양방향 동기화
+        self.sync_all()
 
         self.current_date = datetime.now().date()
         self.refresh_timer = QTimer(self)
-        self.refresh_timer.timeout.connect(self.check_date_change)
-        self.refresh_timer.start(60000)
+        self.refresh_timer.timeout.connect(self.timer_routine)
+        self.refresh_timer.start(60000) # 1분마다 동작하되, 자정 체크용으로만 사용
 
-    def check_date_change(self):
+    def timer_routine(self):
         today = datetime.now().date()
+        # 자정이 지나 날짜가 변경되었을 때만 딱 한 번 동기화
         if today != self.current_date:
             self.current_date = today
-            self.refresh_lists()
+            self.sync_all()
+
+    def sync_all(self):
+        self.sync_app_to_google_calendar()
+        self.sync_google_calendar_to_app()
+        self.refresh_lists()
+
+    def sync_app_to_google_calendar(self):
+        """앱의 기존 할 일 중 구글 캘린더에 없는 항목(기억할 일 제외)을 GCal에 등록"""
+        new_updates = False
+        for task in self.tasks:
+            if not task.get("is_completed") and task.get("deadline") and "gcal_id" not in task:
+                event_id = self.gcal_manager.create_event(task["title"], task["deadline"], task.get("memo", ""))
+                if event_id:
+                    task["gcal_id"] = event_id
+                    new_updates = True
+        if new_updates:
+            self.save_data()
+
+    def sync_google_calendar_to_app(self):
+        """구글 캘린더에서 일정을 읽어와 앱에 반영 및 삭제된 일정 동기화"""
+        events = self.gcal_manager.get_upcoming_events()
+        fetched_gcal_ids = {event['id'] for event in events}
+        
+        # --- 1. GCal에서 삭제된 일정 동기화 (앱에서도 삭제) ---
+        today = datetime.now().date()
+        tasks_to_keep = []
+        sync_modified = False
+        
+        for task in self.tasks:
+            keep = True
+            # 앱에 구글 캘린더 ID가 등록되어 있고, 아직 미완료인 경우
+            if "gcal_id" in task and not task["is_completed"]:
+                base_gcal_id = task["gcal_id"].replace("_start", "").replace("_end", "")
+                try:
+                    task_date = datetime.strptime(task["deadline"], "%Y-%m-%d").date()
+                    # 마감일이 미래/오늘인데, 방금 불러온 GCal 목록에 없다면 구글 캘린더에서 지워진 것
+                    if task_date >= today and base_gcal_id not in fetched_gcal_ids:
+                        keep = False
+                        sync_modified = True
+                except ValueError:
+                    pass
+            
+            if keep:
+                tasks_to_keep.append(task)
+                
+        if sync_modified:
+            self.tasks = tasks_to_keep
+
+        # --- 2. GCal에서 새로운 일정 가져오기 ---
+        existing_gcal_ids = [t.get("gcal_id") for t in self.tasks if "gcal_id" in t]
+        
+        for event in events:
+            event_id = event['id']
+            start_raw = event['start'].get('dateTime', event['start'].get('date'))
+            end_raw = event['end'].get('dateTime', event['end'].get('date'))
+            is_all_day = 'date' in event['start']
+            
+            try:
+                start_date_str = start_raw.split('T')[0]
+                end_date_str = end_raw.split('T')[0]
+                
+                start_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+                end_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+                
+                # 종일 일정은 종료일이 다음 날 00:00으로 넘어오므로 하루 빼서 실제 마지막 날짜를 계산
+                if is_all_day:
+                    actual_end_dt = end_dt - timedelta(days=1)
+                else:
+                    actual_end_dt = end_dt
+                    
+                summary = event.get('summary', '제목 없는 일정')
+                desc = event.get('description', '')
+
+                if actual_end_dt > start_dt: # 다중일 일정
+                    id_start = f"{event_id}_start"
+                    id_end = f"{event_id}_end"
+                    
+                    if id_start not in existing_gcal_ids:
+                        self.tasks.append({
+                            "title": f"{summary} 시작",
+                            "deadline": start_date_str,
+                            "memo": desc, "category": "기타", "is_completed": False, "gcal_id": id_start
+                        })
+                        sync_modified = True
+                    if id_end not in existing_gcal_ids:
+                        self.tasks.append({
+                            "title": f"{summary} 끝",
+                            "deadline": actual_end_dt.strftime("%Y-%m-%d"),
+                            "memo": desc, "category": "기타", "is_completed": False, "gcal_id": id_end
+                        })
+                        sync_modified = True
+                else: # 단일 일정
+                    if event_id not in existing_gcal_ids:
+                        self.tasks.append({
+                            "title": summary,
+                            "deadline": start_date_str,
+                            "memo": desc, "category": "기타", "is_completed": False, "gcal_id": event_id
+                        })
+                        sync_modified = True
+            except Exception as e:
+                print(f"이벤트 파싱 오류: {e}")
+                
+        if sync_modified:
+            self.save_data()
 
     def init_ui(self):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.resize(850, 500)
+        
+        # 저장된 크기(win_w, win_h)로 창 크기 조절
+        self.resize(self.win_w, self.win_h)
         
         if self.win_x is not None and self.win_y is not None:
             self.move(self.win_x, self.win_y)
@@ -400,6 +582,12 @@ class ChecklistApp(QWidget):
         self.search_input.setStyleSheet("background-color: white; color: black; padding: 5px; border-radius: 3px; border: 1px solid #ccc;")
         self.search_input.textChanged.connect(self.refresh_lists) 
         search_layout.addWidget(self.search_input)
+        
+        sync_btn = QPushButton("🔄 수동 동기화")
+        sync_btn.setStyleSheet("background-color: white; color: black; padding: 5px 15px; border-radius: 3px; border: 1px solid #ccc;")
+        sync_btn.clicked.connect(self.sync_all)
+        search_layout.addWidget(sync_btn)
+        
         bg_layout.addLayout(search_layout)
 
         lists_layout = QHBoxLayout()
@@ -497,8 +685,7 @@ class ChecklistApp(QWidget):
         bg_layout.addLayout(bottom_layout)
 
     def open_delete_dialog(self):
-        if not self.tasks:
-            return  
+        if not self.tasks: return  
             
         dialog = DeleteDialog(self.tasks, self)
         if dialog.exec():
@@ -510,8 +697,7 @@ class ChecklistApp(QWidget):
                 self.refresh_lists()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.oldPos = event.globalPosition().toPoint()
+        if event.button() == Qt.MouseButton.LeftButton: self.oldPos = event.globalPosition().toPoint()
 
     def mouseMoveEvent(self, event):
         if self.oldPos is not None:
@@ -540,13 +726,18 @@ class ChecklistApp(QWidget):
                 self.bg_color = settings.get("bg_color", self.bg_color)
                 self.win_x = settings.get("win_x")
                 self.win_y = settings.get("win_y")
+                # 저장된 너비와 높이를 불러옴 (없을 경우 기본값 적용)
+                self.win_w = settings.get("win_w", 850)
+                self.win_h = settings.get("win_h", 500)
 
     def save_settings(self):
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
-                "bg_color": self.bg_color,
-                "win_x": self.x(),
-                "win_y": self.y()
+                "bg_color": self.bg_color, 
+                "win_x": self.x(), 
+                "win_y": self.y(),
+                "win_w": self.width(),   # 현재 창 너비 저장
+                "win_h": self.height()   # 현재 창 높이 저장
             }, f)
 
     def load_data(self):
@@ -562,8 +753,7 @@ class ChecklistApp(QWidget):
 
     def add_task(self, is_remember=False):
         title = self.new_task_input.text().strip()
-        if not title:
-            return
+        if not title: return
             
         deadline = "" if is_remember else self.date_picker.date().toString("yyyy-MM-dd")
         new_task = {
@@ -573,31 +763,32 @@ class ChecklistApp(QWidget):
             "category": "기타",
             "is_completed": False
         }
+        
+        if not is_remember and self.gcal_manager.service:
+            event_id = self.gcal_manager.create_event(title, deadline)
+            if event_id:
+                new_task["gcal_id"] = event_id
+
         self.tasks.append(new_task)
         self.new_task_input.clear()
         self.save_data()
         self.refresh_lists()
 
-    # --- 업데이트: 검색 조건에 날짜 포함 로직 추가 ---
     def refresh_lists(self):
         self.todo_list.clear()
         self.remember_list.clear()
         self.done_todo_list.clear()
         self.done_remember_list.clear()
 
-        # '.'을 '-'로 바꿔서 '03.23' 등으로 검색해도 걸리게 약간의 편의성 추가
         query = self.search_input.text().strip().lower().replace(".", "-") if hasattr(self, 'search_input') else ""
 
-        todo_tasks = []
-        remember_tasks = []
-        done_todo_tasks = []
-        done_remember_tasks = []
+        todo_tasks, remember_tasks, done_todo_tasks, done_remember_tasks = [], [], [], []
 
         for t in self.tasks:
             title_match = query in t["title"].lower()
             memo_match = query in t.get("memo", "").lower()
             cat_match = query in t.get("category", "").lower()
-            date_match = query in t.get("deadline", "") # 날짜 검색 추가
+            date_match = query in t.get("deadline", "")
             
             if query and not (title_match or memo_match or cat_match or date_match):
                 continue
@@ -605,14 +796,10 @@ class ChecklistApp(QWidget):
             is_done = t["is_completed"]
             has_date = bool(t.get("deadline"))
             
-            if not is_done and has_date:
-                todo_tasks.append(t)
-            elif not is_done and not has_date:
-                remember_tasks.append(t)
-            elif is_done and has_date:
-                done_todo_tasks.append(t)
-            elif is_done and not has_date:
-                done_remember_tasks.append(t)
+            if not is_done and has_date: todo_tasks.append(t)
+            elif not is_done and not has_date: remember_tasks.append(t)
+            elif is_done and has_date: done_todo_tasks.append(t)
+            elif is_done and not has_date: done_remember_tasks.append(t)
 
         todo_tasks.sort(key=lambda x: datetime.strptime(x["deadline"], "%Y-%m-%d").date())
         done_todo_tasks.sort(key=lambda x: datetime.strptime(x["deadline"], "%Y-%m-%d").date(), reverse=True)
