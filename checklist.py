@@ -81,7 +81,6 @@ class GoogleCalendarManager:
     def get_upcoming_events(self, days=30):
         if not self.service: return []
         try:
-            # 안전한 삭제 검증을 위해 오늘 자정(00:00:00)부터의 모든 일정을 가져옴
             today_start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
             time_min = today_start.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
             
@@ -436,17 +435,15 @@ class ChecklistApp(QWidget):
         self.load_data()
         self.init_ui()
         
-        # 앱 시작 시 한 번 양방향 동기화
         self.sync_all()
 
         self.current_date = datetime.now().date()
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.timer_routine)
-        self.refresh_timer.start(60000) # 1분마다 동작하되, 자정 체크용으로만 사용
+        self.refresh_timer.start(60000)
 
     def timer_routine(self):
         today = datetime.now().date()
-        # 자정이 지나 날짜가 변경되었을 때만 딱 한 번 동기화
         if today != self.current_date:
             self.current_date = today
             self.sync_all()
@@ -457,7 +454,6 @@ class ChecklistApp(QWidget):
         self.refresh_lists()
 
     def sync_app_to_google_calendar(self):
-        """앱의 기존 할 일 중 구글 캘린더에 없는 항목(기억할 일 제외)을 GCal에 등록"""
         new_updates = False
         for task in self.tasks:
             if not task.get("is_completed") and task.get("deadline") and "gcal_id" not in task:
@@ -469,23 +465,19 @@ class ChecklistApp(QWidget):
             self.save_data()
 
     def sync_google_calendar_to_app(self):
-        """구글 캘린더에서 일정을 읽어와 앱에 반영 및 삭제된 일정 동기화"""
         events = self.gcal_manager.get_upcoming_events()
         fetched_gcal_ids = {event['id'] for event in events}
         
-        # --- 1. GCal에서 삭제된 일정 동기화 (앱에서도 삭제) ---
         today = datetime.now().date()
         tasks_to_keep = []
         sync_modified = False
         
         for task in self.tasks:
             keep = True
-            # 앱에 구글 캘린더 ID가 등록되어 있고, 아직 미완료인 경우
             if "gcal_id" in task and not task["is_completed"]:
                 base_gcal_id = task["gcal_id"].replace("_start", "").replace("_end", "")
                 try:
                     task_date = datetime.strptime(task["deadline"], "%Y-%m-%d").date()
-                    # 마감일이 미래/오늘인데, 방금 불러온 GCal 목록에 없다면 구글 캘린더에서 지워진 것
                     if task_date >= today and base_gcal_id not in fetched_gcal_ids:
                         keep = False
                         sync_modified = True
@@ -498,7 +490,6 @@ class ChecklistApp(QWidget):
         if sync_modified:
             self.tasks = tasks_to_keep
 
-        # --- 2. GCal에서 새로운 일정 가져오기 ---
         existing_gcal_ids = [t.get("gcal_id") for t in self.tasks if "gcal_id" in t]
         
         for event in events:
@@ -514,16 +505,26 @@ class ChecklistApp(QWidget):
                 start_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date()
                 end_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date()
                 
-                # 종일 일정은 종료일이 다음 날 00:00으로 넘어오므로 하루 빼서 실제 마지막 날짜를 계산
                 if is_all_day:
                     actual_end_dt = end_dt - timedelta(days=1)
+                    time_memo_single = ""
+                    time_memo_start = ""
+                    time_memo_end = ""
                 else:
                     actual_end_dt = end_dt
+                    s_time_obj = datetime.fromisoformat(start_raw.replace('Z', '+00:00')).astimezone()
+                    e_time_obj = datetime.fromisoformat(end_raw.replace('Z', '+00:00')).astimezone()
+                    s_time = s_time_obj.strftime('%H:%M')
+                    e_time = e_time_obj.strftime('%H:%M')
+                    
+                    time_memo_single = f"[시간: {s_time} ~ {e_time}]\n"
+                    time_memo_start = f"[시작 시간: {s_time}]\n"
+                    time_memo_end = f"[종료 시간: {e_time}]\n"
                     
                 summary = event.get('summary', '제목 없는 일정')
                 desc = event.get('description', '')
 
-                if actual_end_dt > start_dt: # 다중일 일정
+                if actual_end_dt > start_dt: 
                     id_start = f"{event_id}_start"
                     id_end = f"{event_id}_end"
                     
@@ -531,22 +532,25 @@ class ChecklistApp(QWidget):
                         self.tasks.append({
                             "title": f"{summary} 시작",
                             "deadline": start_date_str,
-                            "memo": desc, "category": "기타", "is_completed": False, "gcal_id": id_start
+                            "memo": f"{time_memo_start}{desc}".strip(), 
+                            "category": "기타", "is_completed": False, "gcal_id": id_start
                         })
                         sync_modified = True
                     if id_end not in existing_gcal_ids:
                         self.tasks.append({
                             "title": f"{summary} 끝",
                             "deadline": actual_end_dt.strftime("%Y-%m-%d"),
-                            "memo": desc, "category": "기타", "is_completed": False, "gcal_id": id_end
+                            "memo": f"{time_memo_end}{desc}".strip(), 
+                            "category": "기타", "is_completed": False, "gcal_id": id_end
                         })
                         sync_modified = True
-                else: # 단일 일정
+                else: 
                     if event_id not in existing_gcal_ids:
                         self.tasks.append({
                             "title": summary,
                             "deadline": start_date_str,
-                            "memo": desc, "category": "기타", "is_completed": False, "gcal_id": event_id
+                            "memo": f"{time_memo_single}{desc}".strip(), 
+                            "category": "기타", "is_completed": False, "gcal_id": event_id
                         })
                         sync_modified = True
             except Exception as e:
@@ -559,7 +563,6 @@ class ChecklistApp(QWidget):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        # 저장된 크기(win_w, win_h)로 창 크기 조절
         self.resize(self.win_w, self.win_h)
         
         if self.win_x is not None and self.win_y is not None:
@@ -625,9 +628,10 @@ class ChecklistApp(QWidget):
         done_layout.addWidget(done_remember_label)
         done_layout.addWidget(self.done_remember_list)
 
-        lists_layout.addLayout(todo_layout)
-        lists_layout.addLayout(remember_layout)
-        lists_layout.addLayout(done_layout)
+        # --- 탭 너비 비율 적용 (5 : 3 : 2) ---
+        lists_layout.addLayout(todo_layout, stretch=5)
+        lists_layout.addLayout(remember_layout, stretch=3)
+        lists_layout.addLayout(done_layout, stretch=2)
         bg_layout.addLayout(lists_layout)
 
         add_layout = QHBoxLayout()
@@ -726,7 +730,6 @@ class ChecklistApp(QWidget):
                 self.bg_color = settings.get("bg_color", self.bg_color)
                 self.win_x = settings.get("win_x")
                 self.win_y = settings.get("win_y")
-                # 저장된 너비와 높이를 불러옴 (없을 경우 기본값 적용)
                 self.win_w = settings.get("win_w", 850)
                 self.win_h = settings.get("win_h", 500)
 
@@ -736,8 +739,8 @@ class ChecklistApp(QWidget):
                 "bg_color": self.bg_color, 
                 "win_x": self.x(), 
                 "win_y": self.y(),
-                "win_w": self.width(),   # 현재 창 너비 저장
-                "win_h": self.height()   # 현재 창 높이 저장
+                "win_w": self.width(),
+                "win_h": self.height()
             }, f)
 
     def load_data(self):
