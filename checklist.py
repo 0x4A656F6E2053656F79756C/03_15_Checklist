@@ -10,21 +10,18 @@ from PyQt6.QtCore import Qt, QDate, QPoint, QTimer
 from PyQt6.QtGui import QFont
 
 if getattr(sys, 'frozen', False):
-    # exe로 빌드된 경우
     BASE_DIR = os.path.dirname(sys.executable)
 else:
-    # 파이썬으로 실행 중인 경우
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DATA_FILE = os.path.join(BASE_DIR, "tasks.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
-# 카테고리별 파스텔톤 배경색 지정 (숙제 -> 과제로 변경)
 CATEGORY_COLORS = {
-    "과제": "#D9EAF7",  # 연파랑
-    "약속": "#D4EFDF",  # 연초록
-    "미팅": "#E8DAEF",  # 연보라
-    "중요": "#FADBD8",  # 연빨강
+    "과제": "#D9EAF7",  
+    "약속": "#D4EFDF",  
+    "미팅": "#E8DAEF",  
+    "중요": "#FADBD8",  
 }
 
 CALENDAR_STYLE = """
@@ -113,8 +110,10 @@ class DateEditDialog(QDialog):
         self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
         self.calendar.setStyleSheet(CALENDAR_STYLE)
         
-        curr_date = QDate.fromString(current_date_str, "yyyy-MM-dd")
-        self.calendar.setSelectedDate(curr_date)
+        if current_date_str:
+            curr_date = QDate.fromString(current_date_str, "yyyy-MM-dd")
+            self.calendar.setSelectedDate(curr_date)
+            
         layout.addWidget(self.calendar)
 
         btn_layout = QHBoxLayout()
@@ -190,11 +189,12 @@ class MemoDialog(QDialog):
         self.task_data["memo"] = self.memo_edit.toPlainText()
         self.accept()
 
+# --- 업데이트: 기억할 일 구분 및 일괄 선택 추가 ---
 class DeleteDialog(QDialog):
     def __init__(self, tasks, parent=None):
         super().__init__(parent)
         self.setWindowTitle("할 일 삭제")
-        self.resize(320, 380)
+        self.resize(380, 450)
         self.setStyleSheet("background-color: white; color: black;")
         self.tasks = tasks
 
@@ -205,11 +205,17 @@ class DeleteDialog(QDialog):
         layout.addWidget(label)
 
         cb_layout = QHBoxLayout()
-        self.select_todo_cb = QCheckBox("진행 중 일괄 선택")
-        self.select_todo_cb.stateChanged.connect(self.toggle_todo)
-        self.select_done_cb = QCheckBox("완료된 일 일괄 선택")
-        self.select_done_cb.stateChanged.connect(self.toggle_done)
+        self.select_todo_cb = QCheckBox("진행 중")
+        self.select_todo_cb.stateChanged.connect(lambda state: self.toggle_group(state, "todo"))
+        
+        self.select_remember_cb = QCheckBox("기억할 일")
+        self.select_remember_cb.stateChanged.connect(lambda state: self.toggle_group(state, "remember"))
+        
+        self.select_done_cb = QCheckBox("완료된 일")
+        self.select_done_cb.stateChanged.connect(lambda state: self.toggle_group(state, "done"))
+        
         cb_layout.addWidget(self.select_todo_cb)
+        cb_layout.addWidget(self.select_remember_cb)
         cb_layout.addWidget(self.select_done_cb)
         layout.addLayout(cb_layout)
 
@@ -217,13 +223,25 @@ class DeleteDialog(QDialog):
         self.list_widget.setStyleSheet("border: 1px solid #ccc; border-radius: 3px;")
         
         for task in self.tasks:
-            status = "✅" if task["is_completed"] else "📌"
-            item_text = f"[{task.get('category', '기타')}] {task['title']} ({task['deadline']})"
+            is_done = task["is_completed"]
+            has_date = bool(task.get("deadline"))
+            
+            # 타입 지정 (일괄 선택 로직을 위해)
+            if is_done:
+                task_type = "done"
+            elif has_date:
+                task_type = "todo"
+            else:
+                task_type = "remember"
+                
+            status = "✅" if is_done else ("📌" if has_date else "💡")
+            deadline_str = f" ({task['deadline']})" if has_date else ""
+            item_text = f"[{task.get('category', '기타')}] {task['title']}{deadline_str}"
             item = QListWidgetItem(f"{status} {item_text}")
             
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
-            item.setData(Qt.ItemDataRole.UserRole, task["is_completed"]) 
+            item.setData(Qt.ItemDataRole.UserRole, task_type) 
             self.list_widget.addItem(item)
             
         layout.addWidget(self.list_widget)
@@ -241,18 +259,11 @@ class DeleteDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
 
-    def toggle_todo(self, state):
+    def toggle_group(self, state, target_type):
         check_state = Qt.CheckState.Checked if state == 2 else Qt.CheckState.Unchecked
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            if not item.data(Qt.ItemDataRole.UserRole): 
-                item.setCheckState(check_state)
-
-    def toggle_done(self, state):
-        check_state = Qt.CheckState.Checked if state == 2 else Qt.CheckState.Unchecked
-        for i in range(self.list_widget.count()):
-            item = self.list_widget.item(i)
-            if item.data(Qt.ItemDataRole.UserRole): 
+            if item.data(Qt.ItemDataRole.UserRole) == target_type:
                 item.setCheckState(check_state)
 
     def get_indices_to_delete(self):
@@ -291,19 +302,20 @@ class TaskWidget(QWidget):
         self.title_label.setStyleSheet("color: gray; text-decoration: line-through;" if self.task_data["is_completed"] else "color: black;")
         layout.addWidget(self.title_label, stretch=1)
 
-        dday_str, is_overdue = self.calculate_dday(self.task_data["deadline"])
-        
-        self.dday_label = QLabel(dday_str)
-        self.dday_label.mousePressEvent = self.edit_date
-        self.dday_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.dday_label.setMinimumWidth(65)
-        self.dday_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        
-        if is_overdue and not self.task_data["is_completed"]:
-            self.dday_label.setStyleSheet("color: #0275d8; font-weight: bold;") 
-        else:
-            self.dday_label.setStyleSheet("color: #d9534f; font-weight: bold;") 
-        layout.addWidget(self.dday_label)
+        if self.task_data.get("deadline"):
+            dday_str, is_overdue = self.calculate_dday(self.task_data["deadline"])
+            
+            self.dday_label = QLabel(dday_str)
+            self.dday_label.mousePressEvent = self.edit_date
+            self.dday_label.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.dday_label.setMinimumWidth(65)
+            self.dday_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            
+            if is_overdue and not self.task_data["is_completed"]:
+                self.dday_label.setStyleSheet("color: #0275d8; font-weight: bold;") 
+            else:
+                self.dday_label.setStyleSheet("color: #d9534f; font-weight: bold;") 
+            layout.addWidget(self.dday_label)
 
     def calculate_dday(self, deadline_str):
         deadline = datetime.strptime(deadline_str, "%Y-%m-%d").date()
@@ -331,7 +343,7 @@ class TaskWidget(QWidget):
             self.main_window.refresh_lists()
 
     def edit_date(self, event):
-        dialog = DateEditDialog(self.task_data["deadline"], self)
+        dialog = DateEditDialog(self.task_data.get("deadline", ""), self)
         if dialog.exec():
             new_date = dialog.get_date()
             self.task_data["deadline"] = new_date
@@ -349,29 +361,24 @@ class ChecklistApp(QWidget):
 
         self.load_settings()
         self.load_data()
-        self.clean_old_completed_tasks()
         self.init_ui()
         self.refresh_lists()
 
-        # --- 자정 갱신을 위한 타이머 설정 ---
         self.current_date = datetime.now().date()
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.check_date_change)
-        self.refresh_timer.start(60000) # 1분(60000ms)마다 날짜 확인
+        self.refresh_timer.start(60000)
 
     def check_date_change(self):
-        """1분마다 실행되어 자정이 지났는지 확인하고, 지났다면 앱을 새로고침"""
         today = datetime.now().date()
         if today != self.current_date:
             self.current_date = today
-            self.clean_old_completed_tasks()
             self.refresh_lists()
 
     def init_ui(self):
-        # 작업 표시줄에 띄우기 위해 Tool 속성을 제거하고 바탕화면에 고정 유지
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.resize(600, 450)
+        self.resize(850, 500)
         
         if self.win_x is not None and self.win_y is not None:
             self.move(self.win_x, self.win_y)
@@ -389,7 +396,7 @@ class ChecklistApp(QWidget):
 
         search_layout = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍 할 일 및 메모 검색...")
+        self.search_input.setPlaceholderText("🔍 할 일, 메모, 날짜(예: 03-23) 검색...")
         self.search_input.setStyleSheet("background-color: white; color: black; padding: 5px; border-radius: 3px; border: 1px solid #ccc;")
         self.search_input.textChanged.connect(self.refresh_lists) 
         search_layout.addWidget(self.search_input)
@@ -405,15 +412,33 @@ class ChecklistApp(QWidget):
         todo_layout.addWidget(todo_label)
         todo_layout.addWidget(self.todo_list)
 
+        remember_layout = QVBoxLayout()
+        remember_label = QLabel("💡 기억할 일")
+        remember_label.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 5px;")
+        self.remember_list = QListWidget()
+        self.remember_list.setStyleSheet("background-color: transparent; border: 1px solid rgba(0,0,0,30); border-radius: 5px;")
+        remember_layout.addWidget(remember_label)
+        remember_layout.addWidget(self.remember_list)
+
         done_layout = QVBoxLayout()
-        done_label = QLabel("✅ 완료된 일")
-        done_label.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 5px;")
-        self.done_list = QListWidget()
-        self.done_list.setStyleSheet("background-color: transparent; border: 1px solid rgba(0,0,0,30); border-radius: 5px;")
-        done_layout.addWidget(done_label)
-        done_layout.addWidget(self.done_list)
+        
+        done_todo_label = QLabel("✅ 완료된 일 (진행 중)")
+        done_todo_label.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 5px;")
+        self.done_todo_list = QListWidget()
+        self.done_todo_list.setStyleSheet("background-color: transparent; border: 1px solid rgba(0,0,0,30); border-radius: 5px;")
+        
+        done_remember_label = QLabel("✅ 완료된 일 (기억할 일)")
+        done_remember_label.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 5px; margin-top: 10px;")
+        self.done_remember_list = QListWidget()
+        self.done_remember_list.setStyleSheet("background-color: transparent; border: 1px solid rgba(0,0,0,30); border-radius: 5px;")
+        
+        done_layout.addWidget(done_todo_label)
+        done_layout.addWidget(self.done_todo_list)
+        done_layout.addWidget(done_remember_label)
+        done_layout.addWidget(self.done_remember_list)
 
         lists_layout.addLayout(todo_layout)
+        lists_layout.addLayout(remember_layout)
         lists_layout.addLayout(done_layout)
         bg_layout.addLayout(lists_layout)
 
@@ -433,13 +458,18 @@ class ChecklistApp(QWidget):
         custom_calendar.setStyleSheet(CALENDAR_STYLE)
         self.date_picker.setCalendarWidget(custom_calendar)
         
-        add_btn = QPushButton("추가")
-        add_btn.setStyleSheet("background-color: white; color: black; padding: 5px 15px; border-radius: 3px; border: 1px solid #ccc;")
-        add_btn.clicked.connect(self.add_task)
+        add_todo_btn = QPushButton("진행 중 추가")
+        add_todo_btn.setStyleSheet("background-color: white; color: black; padding: 5px 15px; border-radius: 3px; border: 1px solid #ccc;")
+        add_todo_btn.clicked.connect(lambda: self.add_task(is_remember=False))
+
+        add_rem_btn = QPushButton("기억할 일 추가")
+        add_rem_btn.setStyleSheet("background-color: white; color: black; padding: 5px 15px; border-radius: 3px; border: 1px solid #ccc;")
+        add_rem_btn.clicked.connect(lambda: self.add_task(is_remember=True))
         
         add_layout.addWidget(self.new_task_input)
         add_layout.addWidget(self.date_picker)
-        add_layout.addWidget(add_btn)
+        add_layout.addWidget(add_todo_btn)
+        add_layout.addWidget(add_rem_btn)
         bg_layout.addLayout(add_layout)
 
         bottom_layout = QHBoxLayout()
@@ -511,7 +541,6 @@ class ChecklistApp(QWidget):
                 self.win_x = settings.get("win_x")
                 self.win_y = settings.get("win_y")
 
-    # --- 누락되었던 설정 저장 메서드 복구 ---
     def save_settings(self):
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -519,7 +548,6 @@ class ChecklistApp(QWidget):
                 "win_x": self.x(),
                 "win_y": self.y()
             }, f)
-    # ----------------------------------------
 
     def load_data(self):
         if os.path.exists(DATA_FILE):
@@ -528,27 +556,16 @@ class ChecklistApp(QWidget):
         else:
             self.tasks = []
 
-    def clean_old_completed_tasks(self):
-        today = datetime.now().date()
-        active_tasks = []
-        for task in self.tasks:
-            deadline_date = datetime.strptime(task["deadline"], "%Y-%m-%d").date()
-            if task["is_completed"] and deadline_date < today:
-                continue
-            active_tasks.append(task)
-        self.tasks = active_tasks
-        self.save_data()
-
     def save_data(self):
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(self.tasks, f, ensure_ascii=False, indent=4)
 
-    def add_task(self):
+    def add_task(self, is_remember=False):
         title = self.new_task_input.text().strip()
         if not title:
             return
             
-        deadline = self.date_picker.date().toString("yyyy-MM-dd")
+        deadline = "" if is_remember else self.date_picker.date().toString("yyyy-MM-dd")
         new_task = {
             "title": title,
             "deadline": deadline,
@@ -561,36 +578,57 @@ class ChecklistApp(QWidget):
         self.save_data()
         self.refresh_lists()
 
+    # --- 업데이트: 검색 조건에 날짜 포함 로직 추가 ---
     def refresh_lists(self):
         self.todo_list.clear()
-        self.done_list.clear()
+        self.remember_list.clear()
+        self.done_todo_list.clear()
+        self.done_remember_list.clear()
 
-        todo_tasks_all = [t for t in self.tasks if not t["is_completed"]]
-        done_tasks_all = [t for t in self.tasks if t["is_completed"]]
-        
-        todo_tasks_all.sort(key=lambda x: datetime.strptime(x["deadline"], "%Y-%m-%d").date())
-        done_tasks_all.sort(key=lambda x: datetime.strptime(x["deadline"], "%Y-%m-%d").date(), reverse=True)
+        # '.'을 '-'로 바꿔서 '03.23' 등으로 검색해도 걸리게 약간의 편의성 추가
+        query = self.search_input.text().strip().lower().replace(".", "-") if hasattr(self, 'search_input') else ""
 
-        self.tasks = todo_tasks_all + done_tasks_all 
+        todo_tasks = []
+        remember_tasks = []
+        done_todo_tasks = []
+        done_remember_tasks = []
 
-        query = self.search_input.text().strip().lower() if hasattr(self, 'search_input') else ""
-        
-        todo_tasks_filtered = [t for t in todo_tasks_all if query in t["title"].lower() or query in t.get("memo", "").lower() or query in t.get("category", "").lower()]
-        done_tasks_filtered = [t for t in done_tasks_all if query in t["title"].lower() or query in t.get("memo", "").lower() or query in t.get("category", "").lower()]
+        for t in self.tasks:
+            title_match = query in t["title"].lower()
+            memo_match = query in t.get("memo", "").lower()
+            cat_match = query in t.get("category", "").lower()
+            date_match = query in t.get("deadline", "") # 날짜 검색 추가
+            
+            if query and not (title_match or memo_match or cat_match or date_match):
+                continue
+                
+            is_done = t["is_completed"]
+            has_date = bool(t.get("deadline"))
+            
+            if not is_done and has_date:
+                todo_tasks.append(t)
+            elif not is_done and not has_date:
+                remember_tasks.append(t)
+            elif is_done and has_date:
+                done_todo_tasks.append(t)
+            elif is_done and not has_date:
+                done_remember_tasks.append(t)
 
-        for task in todo_tasks_filtered:
-            item = QListWidgetItem()
-            widget = TaskWidget(task, self)
-            item.setSizeHint(widget.sizeHint())
-            self.todo_list.addItem(item)
-            self.todo_list.setItemWidget(item, widget)
+        todo_tasks.sort(key=lambda x: datetime.strptime(x["deadline"], "%Y-%m-%d").date())
+        done_todo_tasks.sort(key=lambda x: datetime.strptime(x["deadline"], "%Y-%m-%d").date(), reverse=True)
 
-        for task in done_tasks_filtered:
-            item = QListWidgetItem()
-            widget = TaskWidget(task, self)
-            item.setSizeHint(widget.sizeHint())
-            self.done_list.addItem(item)
-            self.done_list.setItemWidget(item, widget)
+        def add_items_to_list(widget_list, tasks):
+            for task in tasks:
+                item = QListWidgetItem()
+                widget = TaskWidget(task, self)
+                item.setSizeHint(widget.sizeHint())
+                widget_list.addItem(item)
+                widget_list.setItemWidget(item, widget)
+
+        add_items_to_list(self.todo_list, todo_tasks)
+        add_items_to_list(self.remember_list, remember_tasks)
+        add_items_to_list(self.done_todo_list, done_todo_tasks)
+        add_items_to_list(self.done_remember_list, done_remember_tasks)
 
     def closeEvent(self, event):
         self.save_data()
